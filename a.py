@@ -626,6 +626,155 @@ def equip_best_items(token, install_uuid, proxies=None):
 
     print(Fore.GREEN + f"  ✓ Berhasil equip {equipped_count}/{len(best_items)} item")
 
+
+def get_lucky_boxes_info(token, install_uuid, proxies=None):
+    """Ambil informasi Lucky Boxes draw"""
+    url = "https://api.gamee.com/"
+    headers = create_headers(token, install_uuid)
+    proxy = get_proxy(proxies)
+    
+    payload = [{
+        "jsonrpc": "2.0",
+        "id": "draw.getAll",
+        "method": "draw.getAll",
+        "params": {"pagination": {"offset": 0, "limit": 100}}
+    }]
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload, proxies=proxy, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        if isinstance(data, list) and len(data) > 0:
+            result = data[0]
+            if "result" in result and "draws" in result["result"]:
+                draws = result["result"]["draws"]
+                for draw in draws:
+                    if draw.get("name") == "Lucky Boxes":
+                        return draw
+        return None
+    except Exception as e:
+        print(Fore.RED + f"  ✗ Error getting Lucky Boxes info: {e}")
+        return None
+
+def submit_lucky_boxes_ticket(token, install_uuid, draw_id, amount=1, proxies=None):
+    """Submit tiket ke Lucky Boxes"""
+    url = "https://api.gamee.com/"
+    headers = create_headers(token, install_uuid)
+    proxy = get_proxy(proxies)
+    
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "draw.enter",
+        "method": "draw.enter",
+        "params": {
+            "drawId": draw_id,
+            "enterAmountMicroToken": amount * 1000000
+        }
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload, proxies=proxy, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        
+        if "result" in data and "draw" in data["result"]:
+            draw_result = data["result"]["draw"]
+            my_input = draw_result.get("myInputVirtualToken", {})
+            total_submitted = my_input.get("amountMicroToken", 0) // 1000000
+            
+            return {
+                "success": True,
+                "total_tickets": total_submitted,
+                "participants": draw_result.get("participantsCount", 0)
+            }
+        elif "error" in data:
+            error = data["error"]
+            return {
+                "success": False,
+                "error": error.get("message", "Unknown error")
+            }
+        
+        return {"success": False, "error": "Unknown response"}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def process_lucky_boxes(token, install_uuid, proxies=None):
+    """Process Lucky Boxes - submit tiket sesuai config (tanpa cek tiket terlebih dahulu)"""
+    # Cek apakah fitur enabled di config
+    lucky_boxes_config = SAFETY_CONFIG.get("lucky_boxes", {})
+    
+    if not lucky_boxes_config.get("enabled", False):
+        return
+    
+    print(Fore.MAGENTA + "  🎰 Mengecek Lucky Boxes...")
+    
+    # Ambil info draw
+    draw_info = get_lucky_boxes_info(token, install_uuid, proxies)
+    
+    if not draw_info:
+        print(Fore.YELLOW + "  ℹ Lucky Boxes tidak tersedia saat ini")
+        return
+    
+    draw_id = draw_info["id"]
+    entry_fee = draw_info["entryFeeVirtualToken"]["amountMicroToken"] // 1000000
+    participants = draw_info.get("participantsCount", 0)
+    
+    print(Fore.CYAN + f"  📦 {draw_info['name']} (ID: {draw_id})")
+    print(Fore.CYAN + f"  💰 Entry Fee: {entry_fee} tiket")
+    print(Fore.CYAN + f"  📊 Participants: {participants}")
+    
+    # Tentukan mode submit
+    mode = lucky_boxes_config.get("submit_mode", "single")
+    
+    if mode == "all":
+        # Mode ALL: Submit terus sampai server bilang gabisa
+        print(Fore.YELLOW + f"  → Mode: ALL - Submit sampai gagal...")
+        
+        success_count = 0
+        attempt = 0
+        
+        while True:
+            attempt += 1
+            print(Fore.CYAN + f"  → Submit #{attempt}...", end='')
+            sys.stdout.flush()
+            
+            result = submit_lucky_boxes_ticket(token, install_uuid, draw_id, 1, proxies)
+            
+            if result["success"]:
+                success_count += 1
+                print(Fore.GREEN + f" ✓ Total: {result['total_tickets']} | Participants: {result['participants']}")
+                
+                # Delay antar submit
+                delay = random.uniform(2, 5)
+                time.sleep(delay)
+            else:
+                # Gagal = tiket habis atau error
+                print(Fore.YELLOW + f" ⚠ {result['error']}")
+                break
+        
+        if success_count > 0:
+            print(Fore.GREEN + f"  ✓ Berhasil submit {success_count}x tiket ke Lucky Boxes")
+        else:
+            print(Fore.YELLOW + f"  ℹ Tidak ada tiket untuk disubmit")
+    
+    else:
+        # Mode SINGLE: Submit 1 kali saja
+        print(Fore.YELLOW + f"  → Mode: SINGLE - Submit 1x tiket...")
+        
+        print(Fore.CYAN + f"  → Submit...", end='')
+        sys.stdout.flush()
+        
+        result = submit_lucky_boxes_ticket(token, install_uuid, draw_id, 1, proxies)
+        
+        if result["success"]:
+            print(Fore.GREEN + f" ✓ Total: {result['total_tickets']} | Participants: {result['participants']}")
+            print(Fore.GREEN + f"  ✓ Berhasil submit 1x tiket ke Lucky Boxes")
+        else:
+            print(Fore.YELLOW + f" ⚠ {result['error']}")
+            print(Fore.YELLOW + f"  ℹ Tidak ada tiket untuk disubmit")
+
 def claim_journey(token, install_uuid, proxies=None):
     """Claim journey milestone yang tersedia"""
     url = "https://api.gamee.com/"
@@ -807,6 +956,11 @@ def process_account_session(init_data, account_num, proxies=None):
     
     time.sleep(random.uniform(1, 2))
     
+    # === LUCKY BOXES (FITUR BARU) ===
+    process_lucky_boxes(token, install_uuid, proxies)
+    
+    time.sleep(random.uniform(1, 2))
+    
     # Get game info
     game, daily_rewards, release_number = get_game_info(token, install_uuid, proxies)
     
@@ -814,7 +968,7 @@ def process_account_session(init_data, account_num, proxies=None):
         print(Fore.RED + "  ✗ Gagal mendapatkan info game")
         return 0
     
-    # Get current assets - HANYA UNTUK DISPLAY, TIDAK CEK LIMIT!
+    # Get current assets
     assets = get_assets(token, install_uuid, proxies)
     current_xp = assets.get("AZUKIXP", 0)
     current_coins = assets.get("AZUKICOINS", 0)
@@ -840,7 +994,7 @@ def process_account_session(init_data, account_num, proxies=None):
     
     session_xp = 0
     session_coins = 0
-    coin_limit_reached = False  # Flag untuk track daily limit DARI SERVER
+    coin_limit_reached = False
     
     for game_num in range(1, games_in_session + 1):
         print(Fore.CYAN + f"\n  [Game {game_num}/{games_in_session}]")
@@ -850,7 +1004,6 @@ def process_account_session(init_data, account_num, proxies=None):
             SAFETY_CONFIG["xp_per_game_max"]
         )
         
-        # KIRIM HANYA coin_limit_reached flag, TANPA current_coins & max_coins
         success, msg, xp, coins, limit_flag = play_game_optimized(
             token, install_uuid, release_number,
             target_xp, coin_limit_reached, proxies
@@ -860,12 +1013,10 @@ def process_account_session(init_data, account_num, proxies=None):
             session_xp += xp
             session_coins += coins
         
-        # Update flag jika server return daily limit
         if limit_flag:
             coin_limit_reached = True
             print(Fore.YELLOW + f"  📢 Mode XP aktif untuk game selanjutnya")
         
-        # Delay antar game
         if game_num < games_in_session:
             delay = random.randint(
                 SAFETY_CONFIG["min_delay_between_games"],
